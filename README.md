@@ -184,35 +184,6 @@ docs/
 main.py                     # script de demonstração do pipeline (não é o Orquestrador final)
 ```
 
-## Fora de escopo
-
-Este repositório **não** inclui, hoje:
-
-- O banco de problemas da OBI (dataset com enunciados, imagens e casos de
-  teste oficiais) — o pipeline recebe um `PlannerInput` já montado,
-  independente de onde ele venha.
-- Um Judge real (compilação/execução do código gerado em sandbox contra
-  casos de teste, com veredito AC/WA/CE/RE/TLE).
-- Um Orquestrador com máquina de estados, controle de iterações e
-  agregação de custo entre agentes — `main.py` é só um script linear de
-  demonstração.
-- Interface web, API REST, banco de dados, autenticação, Docker ou
-  qualquer orquestração de infraestrutura. É um projeto de pesquisa em
-  Python puro, rodado por linha de comando.
-
-## Como contribuir / como estender
-
-Antes de implementar qualquer um dos agentes ainda não construídos, leia
-[`docs/agentes/visao-geral.md`](docs/agentes/visao-geral.md) — ele define
-os critérios de engenharia (autonomia, *tool use*, planejamento, memória,
-gerência de estado, autoavaliação, controle de execução, segurança,
-observabilidade, avaliação) que qualquer agente novo deveria satisfazer, e
-as convenções já estabelecidas pelo Agente Planejador (contrato tipado com
-`dataclasses`, injeção de dependência do cliente LLM, variáveis de
-ambiente com prefixo `<AGENTE>__*`, testes sem chamadas de rede reais) —
-para que o próximo agente seja implementado no mesmo estilo, e não como um
-corpo estranho no repositório.
-
 ## Como citar
 
 Ainda não há uma publicação formal associada a este repositório. Até lá,
