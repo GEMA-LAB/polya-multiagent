@@ -98,6 +98,7 @@ por tipo de necessidade:
 
 | Documento | Do que trata |
 |---|---|
+| [`docs/metodologia-polya.md`](docs/metodologia-polya.md) | O método de Pólya em si (as quatro etapas, as perguntas-guia de cada uma, as heurísticas de planejamento) — independente de como ele é implementado aqui. |
 | [`docs/agentes/visao-geral.md`](docs/agentes/visao-geral.md) | Critérios técnicos de agente, arquitetura multiagente completa, contratos entre agentes, o papel do Orquestrador. Comece por aqui. |
 | [`docs/agentes/agente-compreensao.md`](docs/agentes/agente-compreensao.md) | Especificação do Agente de Compreensão (etapa 1 de Pólya). |
 | [`docs/agentes/agente-planejador.md`](docs/agentes/agente-planejador.md) | Resumo do Agente Planejador, com atalhos para a documentação completa abaixo. |
