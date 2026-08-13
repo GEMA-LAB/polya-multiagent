@@ -19,10 +19,14 @@ map onto this class:
 - Reatividade: _infer_depth() reage ao conteúdo real do problema (imagens,
   dificuldade, número de exemplos, palavras-chave de grafo/DP no
   enunciado) e ajusta a profundidade do plano.
-- Comportamento proativo: _detect_scale_hints() e _cross_check_complexity()
-  antecipam problemas de desempenho (limites que sugerem N grande vs.
-  complexidade escolhida) antes que apareçam como TLE no Judge, e ficam no
-  campo `review.risks` mesmo que o modelo não os tenha citado.
+- Comportamento proativo: _estimate_complexity_budget() antecipa problemas de
+  desempenho (orçamento de operações vs. complexidade escolhida) antes que
+  apareçam como TLE no Judge; _verify_trace_against_examples() confere o
+  pseudocódigo contra a saída real dos exemplos antes de qualquer código
+  ser escrito; _assess_justification_quality() sinaliza justificativas
+  genéricas. Os três alimentam `review` mesmo que o modelo não tenha
+  percebido o problema sozinho, e rebaixam `review.confidence`
+  automaticamente quando falham (ver plan()).
 - Aprendizado/adaptação: replan() implementa o ciclo de feedback -- um
   veredito do Judge (JudgeAttemptFeedback) é anexado ao histórico do
   problema e uma nova rodada de planejamento é executada com esse
@@ -36,6 +40,7 @@ map onto this class:
 """
 
 import json
+import math
 import os
 import re
 from typing import Optional
@@ -64,6 +69,7 @@ from .schemas import (
     ProblemUnderstanding,
     SolutionPlan,
     TokenUsage,
+    TraceCheck,
 )
 
 _HARD_KEYWORDS = (
@@ -73,8 +79,17 @@ _HARD_KEYWORDS = (
 )
 _HARD_DIFFICULTIES = {"hard", "dificil", "difícil", "avancado", "avançado", "ouro", "gold"}
 
+# Matches a numeric bound, either scientific ("2 x 10^5", "10^6") or plain
+# (4+ digits). Used only inside a small window right after a size-variable
+# anchor (see _SIZE_VAR_ANCHOR) so that value bounds unrelated to input size
+# (e.g. "-10^9 <= A, B <= 10^9" for two summands) are not mistaken for N.
 _SCALE_PATTERN = re.compile(r"(?:(\d+(?:[.,]\d+)?)\s*[x*]?\s*)?10\s*\^\s*(\d+)|(\d{4,})")
-_RISKY_COMPLEXITY_PATTERNS = ("n^2", "n²", "n^3", "n³", "2^n", "n!")
+
+# Canonical size-variable names used in OBI/competitive-programming
+# statements ("1 <= N <= 200000", "N (número de vértices) <= 10^5", ...).
+_SIZE_VAR_ANCHOR = re.compile(r"\b([NMQKT])\b\s*(?:\([^)]*\))?\s*(?:<=|≤)")
+
+_OPS_PER_SECOND = 1e8  # common competitive-programming rule of thumb
 
 
 def _require_keys(data: dict, keys: tuple, stage: str, raw: str) -> None:
@@ -138,8 +153,7 @@ class PlaninngAgent:
         execution, u3, t3 = self._carry_out_plan(planner_input, understanding, solution_plan, depth)
         review, u4, t4 = self._look_back(planner_input, understanding, solution_plan, execution, depth)
 
-        scale_hints = self._detect_scale_hints(planner_input)
-        review.risks = _dedup(review.risks + self._cross_check_complexity(solution_plan, scale_hints))
+        self._apply_deterministic_checks(planner_input, solution_plan, execution, review)
 
         metadata = self._aggregate_usage([u1, u2, u3, u4], t1 + t2 + t3 + t4)
 
@@ -225,6 +239,7 @@ class PlaninngAgent:
             pseudocode=data["pseudocode"],
             data_structures=list(data.get("data_structures", [])),
             key_steps=list(data.get("key_steps", [])),
+            traced_outputs=[str(o) for o in data.get("traced_outputs", [])],
         )
         return execution, usage, elapsed
 
@@ -258,13 +273,75 @@ class PlaninngAgent:
 
         return PlanningDepth.CONCISE
 
-    def _detect_scale_hints(self, planner_input: PlannerInput) -> list[str]:
-        """Proatividade: extrai limites numéricos do enunciado/especificação
-        de entrada e sinaliza, antes de qualquer execução no Judge, quando a
-        escala sugere a necessidade de uma complexidade menor."""
-        text = " ".join(filter(None, [planner_input.statement, planner_input.input_spec]))
+    # -- deterministic checks (código, não LLM) --------------------------
+    #
+    # As três checagens abaixo sustentam, com sinais computados (não apenas
+    # auto-relatados pelo modelo), os critérios "algoritmo correto",
+    # "complexidade correta" e "qualidade da justificativa": ver
+    # docs/agente-planejador/interface.md.
+
+    def _apply_deterministic_checks(self, planner_input: PlannerInput, solution_plan: SolutionPlan,
+                                     execution: ExecutionSketch, review: PlanReview) -> None:
+        trace_checks = self._verify_trace_against_examples(planner_input, execution)
+        complexity_feasible, budget_note = self._estimate_complexity_budget(planner_input, solution_plan)
+        justification_issues = self._assess_justification_quality(solution_plan)
+
+        review.trace_checks = trace_checks
+        review.complexity_feasible = complexity_feasible
+        review.complexity_budget_note = budget_note
+        review.justification_quality_issues = justification_issues
+
+        new_risks = []
+        failed_traces = [c for c in trace_checks if not c.matches]
+        for check in failed_traces:
+            new_risks.append(
+                f"Rastreamento manual do pseudocódigo não bateu com o exemplo {check.example_index + 1} "
+                f"(esperado: {check.expected_output!r}, obtido: {check.traced_output!r})."
+            )
+        if complexity_feasible is False:
+            new_risks.append(budget_note)
+        new_risks.extend(justification_issues)
+
+        review.risks = _dedup(review.risks + new_risks)
+
+        if failed_traces or complexity_feasible is False or justification_issues:
+            review.confidence = "low"
+
+    @staticmethod
+    def _normalize_output(text: str) -> str:
+        return " ".join(text.split())
+
+    def _verify_trace_against_examples(self, planner_input: PlannerInput,
+                                        execution: ExecutionSketch) -> list[TraceCheck]:
+        """'Algoritmo correto': compara, em código, o que o modelo alega que
+        o pseudocódigo produziria (ExecutionSketch.traced_outputs) contra a
+        saída real de cada exemplo -- não é o modelo apenas afirmando que
+        está certo."""
+        checks = []
+        for i, example in enumerate(planner_input.examples):
+            traced = execution.traced_outputs[i] if i < len(execution.traced_outputs) else ""
+            matches = bool(traced) and self._normalize_output(traced) == self._normalize_output(example.output)
+            checks.append(TraceCheck(
+                example_index=i,
+                expected_output=example.output,
+                traced_output=traced,
+                matches=matches,
+            ))
+        return checks
+
+    def _extract_scale(self, planner_input: PlannerInput) -> float:
+        """Extrai o maior limite numérico associado a uma variável de
+        tamanho canônica (N, M, Q, K, T), procurando em uma janela curta
+        logo após ocorrências de "N <=", "M <=" etc. Ancorar na variável
+        evita confundir limites de valor (ex.: "-10^9 <= A, B <= 10^9" para
+        dois números somados) com limites de tamanho de entrada."""
+        text = " ".join(filter(None, [planner_input.input_spec, planner_input.statement]))
         max_scale = 0.0
-        for match in _SCALE_PATTERN.finditer(text):
+        for anchor in _SIZE_VAR_ANCHOR.finditer(text):
+            window = text[anchor.end():anchor.end() + 20]
+            match = _SCALE_PATTERN.search(window)
+            if not match:
+                continue
             if match.group(2):
                 coefficient = float(match.group(1).replace(",", ".")) if match.group(1) else 1.0
                 value = coefficient * (10 ** int(match.group(2)))
@@ -273,27 +350,107 @@ class PlaninngAgent:
             else:
                 continue
             max_scale = max(max_scale, value)
+        return max_scale
 
-        if max_scale >= 10 ** 7:
-            return [f"Limites sugerem escala ~{max_scale:.0e}; soluções O(N log N) ou melhores provavelmente são necessárias."]
-        if max_scale >= 10 ** 4:
-            return [f"Limites sugerem escala ~{max_scale:.0e}; evite complexidade O(N^2) ou pior sem justificativa explícita."]
-        return []
+    @staticmethod
+    def _approx_operations(complexity: str, n: float) -> Optional[float]:
+        """Estima grosseiramente o número de operações de uma notação
+        Big-O em texto livre, para N dado. Necessariamente heurístico --
+        complexidade é texto livre do LLM, não uma expressão estruturada --
+        mas dá um número para comparar com o orçamento de operações, em vez
+        de só casar substrings como "n^2".
 
-    def _cross_check_complexity(self, solution_plan: SolutionPlan, scale_hints: list[str]) -> list[str]:
-        """Proatividade: cruza a complexidade escolhida pelo modelo com os
-        limites detectados em _detect_scale_hints, mesmo que o próprio modelo
-        não tenha sinalizado o conflito."""
-        if not scale_hints:
-            return []
+        O caso "log" precisa de cuidado: "(N + M) log N", "N log N" e
+        "log N" sozinho devem virar estimativas bem diferentes. Em vez de
+        checar substrings fixas tipo "nlogn" (que não bate com "(N+M)
+        log N"), removemos o termo "log(...)" da string e checamos se
+        ainda sobra alguma variável de tamanho (N/M/Q/K) fora dele -- se
+        sobrar, é um fator multiplicativo (N log N); se não sobrar, é
+        log N "puro"."""
+        c = complexity.lower().replace(" ", "")
+        n = max(n, 2.0)
+        try:
+            if "n!" in c:
+                return math.factorial(min(int(n), 20)) if n <= 20 else math.inf
+            if "2^n" in c:
+                return 2.0 ** min(n, 60)
+            if "n^3" in c or "n³" in c:
+                return n ** 3
+            if "n^2" in c or "n²" in c:
+                return n ** 2
+            if "sqrt(n)" in c or "n^0.5" in c or "√n" in c:
+                return n ** 0.5
+            if "log" in c:
+                log_n = math.log2(n)
+                outside_log = re.sub(r"log2?\(?[a-z0-9+*]*\)?", "", c)
+                has_extra_size_var = bool(re.search(r"[nmqk]", outside_log))
+                return n * log_n if has_extra_size_var else log_n
+            if c.strip("o() ") in ("1", ""):
+                return 1.0
+            # padrão: trata como aproximadamente linear (O(N), O(N+M), etc.)
+            return n
+        except OverflowError:
+            return math.inf
 
-        complexity = solution_plan.complexity.time_complexity.lower().replace(" ", "")
-        if any(pattern in complexity for pattern in _RISKY_COMPLEXITY_PATTERNS):
-            return scale_hints + [
-                f"A estratégia escolhida tem complexidade '{solution_plan.complexity.time_complexity}', "
-                "que pode ser inviável dado o tamanho de entrada sugerido pelo enunciado."
-            ]
-        return scale_hints
+    def _estimate_complexity_budget(self, planner_input: PlannerInput,
+                                     solution_plan: SolutionPlan) -> tuple[Optional[bool], Optional[str]]:
+        """'Complexidade correta': em vez de casar palavras-chave, calcula
+        um orçamento de operações (limite de tempo x ~1e8 op/s, regra
+        prática comum em programação competitiva) e compara com a
+        complexidade escolhida aplicada à escala de N detectada. Devolve
+        (None, None) quando nenhuma escala pôde ser detectada -- nesse
+        caso não há base para julgar."""
+        n = self._extract_scale(planner_input)
+        if n <= 0:
+            return None, None
+
+        time_limit = planner_input.time_limit_seconds or 1.0
+        budget = time_limit * _OPS_PER_SECOND
+        approx_ops = self._approx_operations(solution_plan.complexity.time_complexity, n)
+        if approx_ops is None:
+            return None, None
+
+        feasible = approx_ops <= budget
+        note = (
+            f"Orçamento de complexidade: N~{n:.0e}, limite de tempo "
+            f"{'informado' if planner_input.time_limit_seconds else 'assumido (não informado)'} "
+            f"de {time_limit:.1f}s -> orçamento ~{budget:.0e} operações; complexidade "
+            f"'{solution_plan.complexity.time_complexity}' estimada em ~{approx_ops:.0e} operações "
+            f"({'dentro do orçamento' if feasible else 'ACIMA do orçamento, risco real de TLE'})."
+        )
+        return feasible, note
+
+    def _assess_justification_quality(self, solution_plan: SolutionPlan) -> list[str]:
+        """'Qualidade da justificativa': checagem estrutural determinística
+        (não um juiz de LLM) -- garante que a justificativa não é
+        genérica: tem tamanho mínimo, cita algum número dos limites do
+        problema, e (quando há alternativas) menciona por que ao menos uma
+        foi descartada."""
+        issues = []
+        justification = solution_plan.strategy_justification.strip()
+        if len(justification) < 20:
+            issues.append("Justificativa da estratégia é muito curta/genérica.")
+        if not re.search(r"\d", justification):
+            issues.append("Justificativa da estratégia não cita nenhum valor numérico dos limites do problema.")
+
+        other_strategies = [
+            s for s in solution_plan.candidate_strategies if s != solution_plan.chosen_strategy
+        ]
+        if other_strategies:
+            mentioned = any(
+                word in justification.lower()
+                for strategy in other_strategies
+                for word in re.findall(r"\w+", strategy.lower())
+                if len(word) > 3
+            )
+            if not mentioned:
+                issues.append("Justificativa não explica por que as estratégias alternativas foram descartadas.")
+
+        complexity_justification = solution_plan.complexity.justification.strip()
+        if len(complexity_justification) < 15:
+            issues.append("Justificativa da complexidade é muito curta/genérica.")
+
+        return issues
 
     # -- LLM plumbing -----------------------------------------------------
 

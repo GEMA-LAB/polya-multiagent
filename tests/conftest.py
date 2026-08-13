@@ -40,11 +40,14 @@ PLAN_JSON = json.dumps({
     "algorithmic_pattern": "programacao dinamica (Kadane)",
     "candidate_strategies": ["forca bruta O(N^2)", "kadane O(N)"],
     "chosen_strategy": "kadane",
-    "strategy_justification": "O(N) atende ao limite de N <= 200000",
+    "strategy_justification": (
+        "kadane e O(N), o que atende ao limite de N <= 200000; a alternativa "
+        "forca bruta seria O(N^2), inviavel para esse tamanho de entrada."
+    ),
     "complexity": {
         "time_complexity": "O(N)",
         "space_complexity": "O(1)",
-        "justification": "uma passada pelo vetor, sem estruturas auxiliares",
+        "justification": "uma passada pelo vetor com N <= 200000, sem estruturas auxiliares",
     },
     "corner_cases": ["todos os elementos negativos", "N = 1"],
 })
@@ -53,6 +56,7 @@ EXECUTION_JSON = json.dumps({
     "pseudocode": "best = arr[0]; cur = arr[0]\nfor x in arr[1:]:\n  cur = max(x, cur + x)\n  best = max(best, cur)",
     "data_structures": [],
     "key_steps": ["inicializar best e cur com arr[0]", "iterar e atualizar cur", "atualizar best"],
+    "traced_outputs": ["4"],
 })
 
 REVIEW_JSON = json.dumps({

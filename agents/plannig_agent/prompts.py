@@ -111,16 +111,27 @@ def build_planning_prompt(planner_input: PlannerInput, understanding: ProblemUnd
         "justificativa, e liste corner cases esperados (entradas vazias, "
         "valores extremos, ciclos, empates, overflow etc.) -- essa é a causa "
         "mais comum de falha de modelos em programação competitiva.\n\n"
+        "IMPORTANTE sobre 'strategy_justification': cite explicitamente o "
+        "valor numérico do limite (ex.: 'N <= 10^5') que te fez descartar as "
+        "outras estratégias candidatas e escolher esta, e explique por que "
+        "pelo menos uma alternativa descartada seria pior (mais lenta, "
+        "mais complexa de implementar, ou não cobre algum corner case). "
+        "Uma justificativa genérica sem número e sem comparação será "
+        "rejeitada por uma checagem automática.\n"
+        "IMPORTANTE sobre 'complexity.justification': explique como a "
+        "complexidade escolhida se relaciona com o(s) limite(s) numérico(s) "
+        "do problema (ex.: 'O(N log N) com N <= 10^5 executa ~10^6 "
+        "operações, bem dentro do limite de tempo').\n\n"
         "Responda em JSON com exatamente estas chaves:\n"
         "{\n"
         '  "algorithmic_pattern": "nome do padrão algorítmico principal",\n'
         '  "candidate_strategies": ["lista de estratégias candidatas consideradas"],\n'
         '  "chosen_strategy": "estratégia escolhida",\n'
-        '  "strategy_justification": "por que essa estratégia foi escolhida em vez das outras",\n'
+        '  "strategy_justification": "por que essa estratégia foi escolhida em vez das outras, citando o limite numérico e comparando com ao menos uma alternativa descartada",\n'
         '  "complexity": {\n'
         '    "time_complexity": "ex: O(N log N)",\n'
         '    "space_complexity": "ex: O(N)",\n'
-        '    "justification": "por que essa complexidade atende aos limites do problema"\n'
+        '    "justification": "por que essa complexidade atende aos limites do problema, citando o valor do limite"\n'
         "  },\n"
         '  "corner_cases": ["lista de corner cases que a solução precisa tratar"]\n'
         "}"
@@ -139,12 +150,21 @@ def build_execution_prompt(planner_input: PlannerInput, understanding: ProblemUn
         "para orientar a geração do código final -- mas NÃO escreva código "
         "Python/C++ completo, apenas pseudocódigo/esqueleto de alto nível. "
         "Isso será usado como contexto adicional para o Agente Codificador.\n\n"
+        f"Depois de escrever o pseudocódigo, SIMULE ele manualmente, passo a "
+        f"passo, para cada um dos exemplos abaixo, e reporte a saída exata "
+        f"que ele produziria -- isso será comparado automaticamente com a "
+        f"saída esperada de cada exemplo, então simule com cuidado em vez de "
+        f"apenas repetir a saída esperada.\n\n"
+        f"### Exemplos para simular\n{_examples_block(planner_input)}\n\n"
         "Responda em JSON com exatamente estas chaves:\n"
         "{\n"
         '  "pseudocode": "pseudocódigo estruturado em texto (pode usar \\n)",\n'
         '  "data_structures": ["estruturas de dados usadas"],\n'
-        '  "key_steps": ["passos-chave do algoritmo em ordem"]\n'
-        "}"
+        '  "key_steps": ["passos-chave do algoritmo em ordem"],\n'
+        '  "traced_outputs": ["saída obtida ao simular o pseudocódigo no exemplo 1", "... no exemplo 2", "..."]\n'
+        "}\n"
+        "'traced_outputs' deve ter exatamente um item por exemplo listado acima, na mesma ordem. "
+        "Se não houver exemplos, use uma lista vazia []."
     )
 
 

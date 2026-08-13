@@ -27,8 +27,8 @@ de código.
 > estrutura que este trabalho preenche. Implementamos por completo apenas
 > `PlaninngAgent` (o Agente Planejador propriamente dito, com as 4 etapas
 > internas). As outras três classes continuam como estavam; seu escopo
-> futuro está descrito em [`docs/outros-agentes.md`](../outros-agentes.md).
-> O nome `PlaninngAgent` (e o diretório `plannig_agent`) mantém o typo já
+> futuro está descrito em [`docs/agentes/`](../agentes/), um documento por
+> agente. O nome `PlaninngAgent` (e o diretório `plannig_agent`) mantém o typo já
 > presente no repositório — não foi corrigido para minimizar o diff fora do
 > escopo pedido.
 
@@ -72,13 +72,31 @@ concatenação de texto solto.
 | 4. Revisar / Look back | `_look_back()` | `build_review_prompt()` | `PlanReview` (riscos, checklist de verificação, confiança) |
 
 A etapa 3 produz **pseudocódigo**, não código-fonte final — isso continua
-sendo responsabilidade do futuro Agente Codificador. A etapa 4 é reforçada
-com uma verificação heurística feita em código Python puro (não pelo LLM):
-`_detect_scale_hints()` lê os limites do enunciado (ex.: "N ≤ 10^6") e
-`_cross_check_complexity()` cruza isso com a complexidade escolhida na
-etapa 2, acrescentando um risco em `review.risks` se a estratégia
-escolhida parecer incompatível com a escala do problema — mesmo que o
-próprio modelo não tenha percebido o conflito.
+sendo responsabilidade do futuro Agente Codificador.
+
+## Checagens determinísticas (código, não LLM)
+
+Depois das 4 chamadas de LLM, `plan()` roda `_apply_deterministic_checks()`,
+que sustenta três critérios de qualidade do plano com sinais **calculados
+em código**, não apenas auto-relatados pelo modelo — porque pedir pro
+próprio LLM avaliar sua própria saída ("dê uma nota de confiança") tende a
+ser otimista demais. Os três alimentam `PlanReview` e, se qualquer um
+falhar, `review.confidence` é forçado para `"low"` independentemente do
+que o LLM tinha dito na etapa 4:
+
+| Critério | Mecanismo | Método |
+|---|---|---|
+| Algoritmo correto | Compara, em código, a saída que o modelo alega que o pseudocódigo produziria (`ExecutionSketch.traced_outputs`, obtida pedindo pro modelo simular manualmente o pseudocódigo em cada exemplo) contra a saída real de `PlannerInput.examples`. | `_verify_trace_against_examples()` → `PlanReview.trace_checks` |
+| Complexidade correta | Calcula um orçamento de operações (`time_limit_seconds × ~10^8 op/s`, regra prática de programação competitiva) e compara com uma estimativa de operações da complexidade escolhida aplicada ao N detectado no enunciado. | `_estimate_complexity_budget()` → `PlanReview.complexity_feasible` / `complexity_budget_note` |
+| Qualidade da justificativa | Checagem estrutural: a justificativa não pode ser curta demais, precisa citar algum valor numérico dos limites do problema, e (quando há alternativas) precisa mencionar por que ao menos uma foi descartada. | `_assess_justification_quality()` → `PlanReview.justification_quality_issues` |
+
+Detalhe importante do segundo mecanismo: `_extract_scale()` não pega
+qualquer número grande do enunciado — ele ancora a busca em variáveis de
+tamanho canônicas (`N`, `M`, `Q`, `K`, `T` seguidas de `<=`), justamente
+para não confundir um limite de **valor** (ex.: `-10^9 <= A, B <= 10^9`
+em "some dois números") com um limite de **tamanho de entrada**. Isso
+corrige um falso positivo real que a primeira versão desse mecanismo
+cometia (documentado em [`exemplos.md`](exemplos.md)).
 
 ## Características de agente inteligente
 
@@ -97,13 +115,14 @@ adaptado ao domínio de programação competitiva:
   `PlanningDepth.CONCISE` e `PlanningDepth.DETAILED`, o que altera a
   instrução dada ao modelo em cada prompt (`_depth_instruction()` em
   `prompts.py`).
-- **Comportamento proativo** — `_detect_scale_hints()` e
-  `_cross_check_complexity()` (`main.py`) antecipam problemas de
-  desempenho *antes* de qualquer submissão ao Judge, sinalizando quando os
-  limites do enunciado sugerem que a complexidade escolhida é arriscada.
-  As `ambiguities` detectadas na etapa 1 também cumprem esse papel: são
-  sinalizadas antes de causarem um Wrong Answer por má interpretação do
-  enunciado.
+- **Comportamento proativo** — as três checagens determinísticas descritas
+  acima (`_verify_trace_against_examples()`, `_estimate_complexity_budget()`,
+  `_assess_justification_quality()`, em `main.py`) antecipam problemas
+  *antes* de qualquer submissão ao Judge — TLE por complexidade
+  incompatível, algoritmo que já erra os próprios exemplos, justificativa
+  que esconde uma escolha não pensada. As `ambiguities` detectadas na
+  etapa 1 também cumprem esse papel: são sinalizadas antes de causarem um
+  Wrong Answer por má interpretação do enunciado.
 - **Aprendizado / adaptação** — `replan()` implementa o ciclo de feedback:
   recebe um `JudgeAttemptFeedback` (veredito, detalhes, caso de teste que
   falhou), anexa a `PlannerInput.previous_attempts` e roda o ciclo de Pólya

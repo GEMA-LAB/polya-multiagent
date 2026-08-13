@@ -104,10 +104,30 @@ problem = PlannerInput(
 
 `ComplexityEstimate`: `time_complexity: str`, `space_complexity: str`, `justification: str`.
 
-`ExecutionSketch`: `pseudocode: str`, `data_structures: list[str]`, `key_steps: list[str]`.
+`ExecutionSketch`: `pseudocode: str`, `data_structures: list[str]`, `key_steps: list[str]`,
+`traced_outputs: list[str]` (simulação manual do pseudocódigo, um item por
+`PlannerInput.examples`, na mesma ordem — pedida ao LLM, mas comparada
+contra a saída real em código, não confiada cegamente).
 
 `PlanReview`: `risks: list[str]`, `verification_checklist: list[str]`,
-`confidence: str` (`"low" | "medium" | "high"`).
+`confidence: str` (`"low" | "medium" | "high"`), mais três campos
+**calculados em código** (não pelo LLM) por
+`PlaninngAgent._apply_deterministic_checks()`:
+
+- `trace_checks: list[TraceCheck]` — um `TraceCheck` por exemplo
+  (`example_index`, `expected_output`, `traced_output`, `matches: bool`),
+  comparando `execution_sketch.traced_outputs` contra a saída real.
+- `complexity_feasible: Optional[bool]` + `complexity_budget_note: Optional[str]`
+  — resultado de um cálculo de orçamento de operações (`time_limit_seconds
+  × ~10^8 op/s`) vs. a complexidade escolhida para o N detectado no
+  enunciado. `None` quando nenhuma escala pôde ser detectada.
+- `justification_quality_issues: list[str]` — problemas estruturais
+  encontrados na justificativa (curta demais, sem número, sem comparação
+  com alternativa descartada); lista vazia = nenhum problema.
+
+Se qualquer uma dessas três checagens falhar, `confidence` é forçado para
+`"low"` em código, mesmo que o LLM tenha reportado `"high"` na etapa 4 —
+ver [`visao-geral.md`](visao-geral.md#checagens-determinísticas-código-não-llm).
 
 `TokenUsage`: `model: str`, `prompt_tokens: int`, `completion_tokens: int`,
 `total_tokens: int`, `input_cost_usd: Optional[float]`,
@@ -142,11 +162,20 @@ PlannerOutput(
         pseudocode="best = arr[0]; cur = arr[0]\nfor x in arr[1:]:\n  cur = max(x, cur + x)\n  best = max(best, cur)",
         data_structures=[],
         key_steps=["inicializar best e cur com arr[0]", "iterar e atualizar cur", "atualizar best"],
+        traced_outputs=["4"],
     ),
     review=PlanReview(
         risks=["overflow em linguagens com inteiro de tamanho fixo"],
         verification_checklist=["testar vetor com todos negativos", "testar N=1"],
         confidence="high",
+        trace_checks=[TraceCheck(example_index=0, expected_output="4", traced_output="4", matches=True)],
+        complexity_feasible=True,
+        complexity_budget_note=(
+            "Orçamento de complexidade: N~2e+05, limite de tempo assumido (não informado) de 1.0s "
+            "-> orçamento ~1e+08 operações; complexidade 'O(N)' estimada em ~2e+05 operações "
+            "(dentro do orçamento)."
+        ),
+        justification_quality_issues=[],
     ),
     metadata=TokenUsage(
         model="gpt-4o-mini", prompt_tokens=1840, completion_tokens=620, total_tokens=2460,

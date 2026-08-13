@@ -56,11 +56,11 @@ def build_coder_prompt(statement: str, plan: PlannerOutput) -> str:
     )
 ```
 
-Quando o `ExecutationAgent` (futuro Agente Codificador, ver
-[`docs/outros-agentes.md`](../outros-agentes.md)) for implementado, ele
-deve receber essa string pronta e passá-la para `LLM.send_prompt()` (ou
-`send_prompt_with_usage()`, se também quiser reportar custo/tokens) — sem
-nenhum reprocessamento manual do plano.
+Quando o `ExecutationAgent` (futuro Agente Executor/Codificador, ver
+[`docs/agentes/agente-execucao.md`](../agentes/agente-execucao.md)) for
+implementado, ele deve receber essa string pronta e passá-la para
+`LLM.send_prompt()` (ou `send_prompt_with_usage()`, se também quiser
+reportar custo/tokens) — sem nenhum reprocessamento manual do plano.
 
 ## Ciclo de feedback com o Judge
 
@@ -133,4 +133,4 @@ totalmente as variáveis de ambiente (é assim que os testes em
 `tests/conftest.py` funcionam, com um `FakeLLM`).
 
 Sugerimos que outros agentes futuros sigam a mesma convenção
-`<AGENTE>__*` — ver [`docs/outros-agentes.md`](../outros-agentes.md).
+`<AGENTE>__*` — ver [`docs/agentes/visao-geral.md`](../agentes/visao-geral.md).

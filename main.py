@@ -7,9 +7,9 @@ from prompt_templates import build_coder_prompt
 def main():
     print("Polya Multiagent")
 
-    # ComprehensionAgent, ExecutationAgent (futuro Agente Codificador) e
-    # ReviewAgent ainda não estão implementados -- ver docs/outros-agentes.md
-    # para o escopo previsto de cada um.
+    # ComprehensionAgent, ExecutationAgent (futuro Agente Executor) e
+    # ReviewAgent ainda não estão implementados -- ver docs/agentes/ para
+    # o escopo previsto de cada um.
     comprehenshion = ComprehensionAgent()
     executation = ExecutationAgent()
     review = ReviewAgent()

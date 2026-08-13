@@ -5,10 +5,12 @@ Os dois exemplos abaixo foram gerados executando o pipeline real
 LLM "roteirizado" (respostas JSON fixas por chamada), já que este
 ambiente de desenvolvimento não tem uma chave de API configurada. Tudo o
 que aparece abaixo — parsing de JSON, construção dos dataclasses,
-`_infer_depth()`, `_detect_scale_hints()`/`_cross_check_complexity()` e
-`to_prompt_section()` — é o comportamento real do agente; só o *conteúdo*
-das respostas do modelo é simulado. O script usado está descrito no fim
-deste documento para reprodutibilidade.
+`_infer_depth()`, as três checagens determinísticas
+(`_verify_trace_against_examples()`, `_estimate_complexity_budget()`,
+`_assess_justification_quality()`) e `to_prompt_section()` — é o
+comportamento real do agente; só o *conteúdo* das respostas do modelo é
+simulado. O script usado está descrito no fim deste documento para
+reprodutibilidade.
 
 ## Exemplo 1 — problema fácil, sem imagem
 
@@ -44,9 +46,9 @@ Ler dois inteiros A e B e imprimir a soma A + B.
 ### 2. Estratégia escolhida
 **Padrão algorítmico:** leitura e aritmética direta
 
-**Estratégia:** ler A e B e imprimir A + B -- Problema de complexidade trivial; não há decisão algorítmica a fazer.
+**Estratégia:** ler A e B e imprimir A + B -- Problema de complexidade trivial (O(1)): mesmo com A, B em até 10^9 em módulo, a soma cabe em um inteiro de 64 bits, então não há decisão algorítmica real a fazer.
 
-**Complexidade estimada:** tempo O(1), espaço O(1) (apenas leitura e uma soma)
+**Complexidade estimada:** tempo O(1), espaço O(1) (apenas leitura e uma soma, sem laços)
 
 **Corner cases a tratar:**
 - A e/ou B negativos
@@ -61,25 +63,38 @@ imprimir A + B
 ### 4. Riscos e checklist de verificação
 **Riscos:**
 - nenhum risco relevante dado o tamanho do problema
-- Limites sugerem escala ~1e+09; soluções O(N log N) ou melhores provavelmente são necessárias.
 
 **Checklist de verificação:**
 - [ ] testar com A e B negativos
 - [ ] testar com A + B próximo do limite de 32 bits
 ```
 
-`metadata`: `TokenUsage(model='gpt-4o-mini', prompt_tokens=982,
-completion_tokens=277, total_tokens=1259, elapsed_seconds=7.2, ...)`
+`metadata`: `TokenUsage(model='gpt-4o-mini', prompt_tokens=1330,
+completion_tokens=314, total_tokens=1644, elapsed_seconds=7.2, ...)`
 
-> **Limitação conhecida da heurística proativa:** o segundo risco acima
-> ("Limites sugerem escala ~1e+09...") é um **falso positivo** de
-> `_detect_scale_hints()` (`agents/plannig_agent/main.py`). A heurística
-> pega qualquer número grande no enunciado/especificação de entrada, sem
-> distinguir "N" (tamanho da entrada, relevante para complexidade) de "A,
-> B" (valores dos dados, irrelevantes para complexidade de um O(1)). É uma
-> limitação real da v1, deixada assim de propósito em vez de uma regra
-> mais frágil tentando adivinhar nomes de variáveis — documentamos aqui em
-> vez de mascarar.
+### Checagens determinísticas (não aparecem no texto acima, mas ficam em `review`)
+
+```python
+review.trace_checks = [
+    TraceCheck(example_index=0, expected_output="8", traced_output="8", matches=True),
+    TraceCheck(example_index=1, expected_output="6", traced_output="6", matches=True),
+]
+review.complexity_feasible = None       # nenhuma escala de N detectada -- ver nota abaixo
+review.complexity_budget_note = None
+review.justification_quality_issues = []
+```
+
+> **Por que `complexity_feasible` é `None` aqui, e não um risco:**
+> `-10^9 <= A, B <= 10^9` é um limite de **valor**, não de **tamanho de
+> entrada** — não existe "N" neste problema (a entrada tem sempre
+> exatamente dois números). `_extract_scale()` ancora a busca em
+> variáveis de tamanho canônicas (`N`, `M`, `Q`, `K`, `T` seguidas de
+> `<=`) exatamente para não confundir os dois. Numa versão anterior deste
+> mecanismo (baseada em casar qualquer número grande no texto, sem essa
+> âncora), este exemplo gerava um falso positivo — um risco de
+> "complexidade" para um problema O(1) trivial. O comportamento atual
+> (`None` = "não há base pra julgar", em vez de arriscar um palpite errado)
+> é o resultado de corrigir esse problema.
 
 ## Exemplo 2 — problema de grafos, com imagem
 
@@ -155,7 +170,6 @@ imprimir dist[N] se dist[N] != infinito senao -1
 **Riscos:**
 - se o grafo for direcionado (ambiguidade detectada na etapa 1), a lista de adjacência precisa ser construída só no sentido u->v
 - overflow se a soma de pesos ao longo do caminho for acumulada em tipo de 32 bits
-- Limites sugerem escala ~2e+05; evite complexidade O(N^2) ou pior sem justificativa explícita.
 
 **Checklist de verificação:**
 - [ ] testar N=1
@@ -165,14 +179,36 @@ imprimir dist[N] se dist[N] != infinito senao -1
 - [ ] confirmar se o grafo é direcionado ou não com um caso de teste específico
 ```
 
-`metadata`: `TokenUsage(model='gpt-4o-mini', prompt_tokens=1354,
-completion_tokens=773, total_tokens=2127, elapsed_seconds=7.2, ...)`
+`metadata`: `TokenUsage(model='gpt-4o-mini', prompt_tokens=1711,
+completion_tokens=780, total_tokens=2491, elapsed_seconds=7.2, ...)`
 
-Note que, diferente do exemplo 1, aqui a etapa 1 (`understanding`)
-detectou uma **ambiguidade real** (grafo direcionado ou não) que a etapa 4
-(`review`) trouxe de volta como risco concreto — exatamente o tipo de
-armadilha que o pipeline zero-shot original deixava passar direto para o
-código.
+### Checagens determinísticas
+
+```python
+review.trace_checks = [
+    TraceCheck(example_index=0, expected_output="4", traced_output="4", matches=True),
+]
+review.complexity_feasible = True
+review.complexity_budget_note = (
+    "Orçamento de complexidade: N~2e+05, limite de tempo informado de 2.0s "
+    "-> orçamento ~2e+08 operações; complexidade 'O((N + M) log N)' "
+    "estimada em ~4e+06 operações (dentro do orçamento)."
+)
+review.justification_quality_issues = []
+```
+
+Todas as três checagens passaram, e por isso `confidence` permaneceu
+`"high"` (o valor que o próprio modelo reportou na etapa 4 não foi
+sobrescrito). Note que `_approx_operations()` precisou tratar
+`"O((N + M) log N)"` como um fator multiplicativo (`N * log2(N)`, não
+`log2(N)` sozinho) — é justamente o tipo de notação com parênteses e soma
+de duas variáveis que quebraria um casamento de substring mais ingênuo.
+
+Note também que, diferente do exemplo 1, aqui a etapa 1
+(`understanding`) detectou uma **ambiguidade real** (grafo direcionado ou
+não) que a etapa 4 (`review`) trouxe de volta como risco concreto —
+exatamente o tipo de armadilha que o pipeline zero-shot original deixava
+passar direto para o código.
 
 ### Prompt final enviado ao Agente Codificador
 
@@ -188,6 +224,28 @@ O mapa de uma cidade é representado pelo grafo da figura, onde vértices são c
 ## Instrução final
 Você é um agente de programação competitiva. Escreva a solução final em Python 3, pronta para submissão, lendo da entrada padrão e escrevendo na saída padrão. Siga o plano de resolução acima, incluindo o tratamento dos corner cases listados. Responda apenas com o código, sem explicações adicionais.
 ```
+
+## Um terceiro caso: quando as checagens determinísticas discordam do modelo
+
+Os dois exemplos acima são "caminho feliz" — todas as checagens
+concordaram com o que o modelo já tinha dito. O caso realmente
+interessante é quando elas discordam; isso está coberto por testes
+dedicados em vez de duplicado aqui (`tests/test_planning_agent.py`):
+
+- `test_verify_trace_against_examples_detects_mismatch_and_downgrades_confidence`
+  — o modelo simula o pseudocódigo e erra o exemplo; `trace_checks[i].matches`
+  vira `False`, um risco descrevendo o esperado-vs-obtido é adicionado, e
+  `confidence` é forçado para `"low"`.
+- `test_complexity_budget_flags_infeasible_plan_and_downgrades_confidence`
+  — o modelo escolhe `O(N^2)` para `N <= 10^6`; `complexity_feasible` vira
+  `False`, com uma nota explicando o orçamento estourado.
+- `test_justification_quality_gate_flags_generic_justification_and_downgrades_confidence`
+  — o modelo justifica com "parece uma boa ideia" (sem número, sem
+  comparação); `justification_quality_issues` lista os problemas
+  estruturais encontrados.
+
+Em todos os três casos, `review.confidence` é sobrescrito para `"low"`
+em código — o valor que o LLM reportou na etapa 4 não é a última palavra.
 
 ## Reprodutibilidade
 

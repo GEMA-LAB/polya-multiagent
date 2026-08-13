@@ -98,6 +98,23 @@ class ExecutionSketch:
     pseudocode: str
     data_structures: list[str] = field(default_factory=list)
     key_steps: list[str] = field(default_factory=list)
+    traced_outputs: list[str] = field(default_factory=list)
+    """Model's manual, step-by-step simulation of `pseudocode` against each
+    entry of PlannerInput.examples, in the same order. Grounds the
+    "algoritmo correto" check: PlaninngAgent._verify_trace_against_examples()
+    compares this, in code, against the real expected output -- it is not
+    just the model asserting its own solution is correct."""
+
+
+@dataclass
+class TraceCheck:
+    """Result of comparing one traced_outputs entry against the real
+    expected output of the corresponding example, computed in code (not by
+    the LLM) by PlaninngAgent._verify_trace_against_examples()."""
+    example_index: int
+    expected_output: str
+    traced_output: str
+    matches: bool
 
 
 @dataclass
@@ -106,6 +123,24 @@ class PlanReview:
     risks: list[str] = field(default_factory=list)
     verification_checklist: list[str] = field(default_factory=list)
     confidence: str = "medium"  # "low" | "medium" | "high"
+    trace_checks: list[TraceCheck] = field(default_factory=list)
+    """Code-computed, per PlaninngAgent._verify_trace_against_examples() --
+    supports the "algoritmo correto" criterion with a grounded signal
+    instead of relying only on the LLM's self-report."""
+    complexity_feasible: Optional[bool] = None
+    """Code-computed, per PlaninngAgent._estimate_complexity_budget() -- an
+    operation-count budget check (time_limit_seconds x ~1e8 ops/s) against
+    the chosen time_complexity for the scale detected in the statement.
+    None when no size limit could be detected. Supports "complexidade
+    correta" with a quantified signal instead of only keyword matching."""
+    complexity_budget_note: Optional[str] = None
+    """Human-readable explanation of the complexity_feasible computation."""
+    justification_quality_issues: list[str] = field(default_factory=list)
+    """Code-computed, per PlaninngAgent._assess_justification_quality() --
+    structural gaps in strategy_justification/complexity.justification
+    (too short, no reference to a concrete limit, no comparison against a
+    discarded alternative). Empty means no issue was detected. Supports
+    "qualidade da justificativa" with a deterministic, repeatable check."""
 
 
 @dataclass
@@ -140,8 +175,18 @@ class PlannerOutput:
         risks = "\n".join(f"- {r}" for r in self.review.risks) or "- (nenhum identificado)"
         checklist = "\n".join(f"- [ ] {c}" for c in self.review.verification_checklist) or "- [ ] (nenhum item)"
 
+        failed_traces = [c for c in self.review.trace_checks if not c.matches]
+        warning = ""
+        if failed_traces or self.review.complexity_feasible is False:
+            warning = (
+                "\n> ⚠️ **Este plano falhou em verificações automáticas** "
+                f"(confiança rebaixada para '{self.review.confidence}'). "
+                "Revise a estratégia e o pseudocódigo antes de traduzi-los em código.\n"
+            )
+
         return (
-            "## Plano de Resolução (gerado pelo Agente Planejador, método de Pólya)\n\n"
+            "## Plano de Resolução (gerado pelo Agente Planejador, método de Pólya)\n"
+            f"{warning}\n"
             f"### 1. Compreensão do problema\n{self.understanding.restatement}\n\n"
             f"**Entrada:** {self.understanding.inputs_description}\n\n"
             f"**Saída:** {self.understanding.outputs_description}\n\n"

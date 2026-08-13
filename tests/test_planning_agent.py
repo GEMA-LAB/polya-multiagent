@@ -1,3 +1,6 @@
+import json
+import math
+
 import pytest
 
 from agents.plannig_agent import (
@@ -107,7 +110,7 @@ def test_depth_inference_reacts_to_hard_signals():
     assert agent._infer_depth(with_images).value == "detailed"
 
 
-def test_scale_hint_and_complexity_cross_check_flags_risky_plan():
+def test_complexity_budget_flags_infeasible_plan_and_downgrades_confidence():
     fake = FakeLLM(canned_stage_responses())
     agent = PlaninngAgent(llm=fake)
 
@@ -117,7 +120,107 @@ def test_scale_hint_and_complexity_cross_check_flags_risky_plan():
     problem = make_planner_input(input_spec="1 <= N <= 10^6")
     output = agent.plan(problem)
 
-    assert any("N^2" in risk or "inviável" in risk for risk in output.review.risks)
+    assert output.review.complexity_feasible is False
+    assert "ACIMA do orçamento" in output.review.complexity_budget_note
+    assert output.review.confidence == "low"
+    assert any("ACIMA do orçamento" in risk for risk in output.review.risks)
+
+
+def test_complexity_budget_accepts_feasible_plan():
+    fake = FakeLLM(canned_stage_responses())
+    agent = PlaninngAgent(llm=fake)
+
+    problem = make_planner_input(input_spec="1 <= N <= 200000", time_limit_seconds=2.0)
+    output = agent.plan(problem)
+
+    # O(N) for N <= 200000 within a 2s budget is comfortably feasible
+    assert output.review.complexity_feasible is True
+    assert output.review.confidence == "high"
+
+
+def test_complexity_budget_ignores_unrelated_value_bounds():
+    """Regression test: a bound on a value (A, B) must not be mistaken for
+    a bound on input size (N), otherwise a trivial O(1) problem gets
+    flagged as if it needed a smaller complexity."""
+    fake = FakeLLM(canned_stage_responses())
+    agent = PlaninngAgent(llm=fake)
+
+    scale = agent._extract_scale(make_planner_input(
+        statement="Leia dois inteiros A e B.",
+        input_spec="-10^9 <= A, B <= 10^9",
+    ))
+
+    assert scale == 0.0
+
+
+def test_verify_trace_against_examples_detects_mismatch_and_downgrades_confidence():
+    fake = FakeLLM(canned_stage_responses())
+    agent = PlaninngAgent(llm=fake)
+
+    # the pseudocode's traced output disagrees with the real expected output
+    fake._responses[2] = fake._responses[2].replace('"traced_outputs": ["4"]', '"traced_outputs": ["3"]')
+
+    output = agent.plan(make_planner_input())
+
+    assert len(output.review.trace_checks) == 1
+    assert output.review.trace_checks[0].matches is False
+    assert output.review.trace_checks[0].expected_output == "4"
+    assert output.review.trace_checks[0].traced_output == "3"
+    assert output.review.confidence == "low"
+    assert any("não bateu" in risk for risk in output.review.risks)
+
+
+def test_verify_trace_against_examples_accepts_matching_trace():
+    fake = FakeLLM(canned_stage_responses())
+    agent = PlaninngAgent(llm=fake)
+
+    output = agent.plan(make_planner_input())
+
+    assert len(output.review.trace_checks) == 1
+    assert output.review.trace_checks[0].matches is True
+
+
+def test_justification_quality_gate_flags_generic_justification_and_downgrades_confidence():
+    fake = FakeLLM(canned_stage_responses())
+    agent = PlaninngAgent(llm=fake)
+
+    fake._responses[1] = fake._responses[1].replace(
+        json.dumps(
+            "kadane e O(N), o que atende ao limite de N <= 200000; a alternativa "
+            "forca bruta seria O(N^2), inviavel para esse tamanho de entrada."
+        ),
+        json.dumps("parece uma boa ideia"),
+    )
+
+    output = agent.plan(make_planner_input())
+
+    assert output.review.justification_quality_issues
+    assert output.review.confidence == "low"
+
+
+def test_justification_quality_gate_accepts_quantified_comparative_justification():
+    fake = FakeLLM(canned_stage_responses())
+    agent = PlaninngAgent(llm=fake)
+
+    output = agent.plan(make_planner_input())
+
+    assert output.review.justification_quality_issues == []
+
+
+def test_approx_operations_distinguishes_log_variants():
+    """Regression test: 'O((N + M) log N)' must not be classified as pure
+    O(log N) just because 'log' appears next to a size variable."""
+    agent = PlaninngAgent(llm=FakeLLM([]))
+    n = 1_000_000
+
+    pure_log = agent._approx_operations("O(log N)", n)
+    n_log_n = agent._approx_operations("O(N log N)", n)
+    sum_log_n = agent._approx_operations("O((N + M) log N)", n)
+
+    assert pure_log == pytest.approx(math.log2(n))
+    assert n_log_n == pytest.approx(n * math.log2(n))
+    assert sum_log_n == pytest.approx(n * math.log2(n))
+    assert pure_log < n_log_n
 
 
 def test_to_prompt_section_is_injectable_markdown():
